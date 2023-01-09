@@ -1,3 +1,4 @@
+import json
 from http import HTTPStatus
 from math import ceil
 from pathlib import Path
@@ -6,7 +7,6 @@ from typing import Optional
 import alembic.command
 import alembic.config
 import fastapi
-import pydantic
 import redis.asyncio as redis
 from fastapi_limiter import FastAPILimiter
 from loguru import logger
@@ -14,9 +14,10 @@ from oasst_backend.api.deps import get_dummy_api_client
 from oasst_backend.api.v1.api import api_router
 from oasst_backend.config import settings
 from oasst_backend.database import engine
-from oasst_backend.prompt_repository import PromptRepository
+from oasst_backend.prompt_repository import PromptRepository, TaskRepository, UserRepository
 from oasst_shared.exceptions import OasstError, OasstErrorCode
 from oasst_shared.schemas import protocol as protocol_schema
+from pydantic import BaseModel
 from sqlmodel import Session
 from starlette.middleware.cors import CORSMiddleware
 
@@ -97,7 +98,7 @@ if settings.DEBUG_USE_SEED_DATA:
 
     @app.on_event("startup")
     def seed_data():
-        class DummyMessage(pydantic.BaseModel):
+        class DummyMessage(BaseModel):
             task_message_id: str
             user_message_id: str
             parent_message_id: Optional[str]
@@ -109,92 +110,51 @@ if settings.DEBUG_USE_SEED_DATA:
             with Session(engine) as db:
                 api_client = get_dummy_api_client(db)
                 dummy_user = protocol_schema.User(id="__dummy_user__", display_name="Dummy User", auth_method="local")
-                pr = PromptRepository(db=db, api_client=api_client, user=dummy_user)
 
-                dummy_messages = [
-                    DummyMessage(
-                        task_message_id="de111fa8",
-                        user_message_id="6f1d0711",
-                        parent_message_id=None,
-                        text="Hi!",
-                        role="prompter",
-                    ),
-                    DummyMessage(
-                        task_message_id="74c381d4",
-                        user_message_id="4a24530b",
-                        parent_message_id="6f1d0711",
-                        text="Hello! How can I help you?",
-                        role="assistant",
-                    ),
-                    DummyMessage(
-                        task_message_id="3d5dc440",
-                        user_message_id="a8c01c04",
-                        parent_message_id="4a24530b",
-                        text="Do you have a recipe for potato soup?",
-                        role="prompter",
-                    ),
-                    DummyMessage(
-                        task_message_id="643716c1",
-                        user_message_id="f43a93b7",
-                        parent_message_id="4a24530b",
-                        text="Who were the 8 presidents before George Washington?",
-                        role="prompter",
-                    ),
-                    DummyMessage(
-                        task_message_id="2e4e1e6",
-                        user_message_id="c886920",
-                        parent_message_id="6f1d0711",
-                        text="Hey buddy! How can I serve you?",
-                        role="assistant",
-                    ),
-                    DummyMessage(
-                        task_message_id="970c437d",
-                        user_message_id="cec432cf",
-                        parent_message_id=None,
-                        text="euirdteunvglfe23908230892309832098 AAAAAAAA",
-                        role="prompter",
-                    ),
-                    DummyMessage(
-                        task_message_id="6066118e",
-                        user_message_id="4f85f637",
-                        parent_message_id="cec432cf",
-                        text="Sorry, I did not understand your request and it is unclear to me what you want me to do. Could you describe it in a different way?",
-                        role="assistant",
-                    ),
-                    DummyMessage(
-                        task_message_id="ba87780d",
-                        user_message_id="0e276b98",
-                        parent_message_id="cec432cf",
-                        text="I'm unsure how to interpret this. Is it a riddle?",
-                        role="assistant",
-                    ),
-                ]
+                ur = UserRepository(db=db, api_client=api_client)
+                tr = TaskRepository(db=db, api_client=api_client, client_user=dummy_user, user_repository=ur)
+                pr = PromptRepository(
+                    db=db, api_client=api_client, client_user=dummy_user, user_repository=ur, task_repository=tr
+                )
+
+                with open(settings.DEBUG_USE_SEED_DATA_PATH) as f:
+                    dummy_messages_raw = json.load(f)
+
+                dummy_messages = [DummyMessage(**dm) for dm in dummy_messages_raw]
 
                 for msg in dummy_messages:
-                    task = pr.fetch_task_by_frontend_message_id(msg.task_message_id)
+                    task = tr.fetch_task_by_frontend_message_id(msg.task_message_id)
                     if task and not task.ack:
                         logger.warning("Deleting unacknowledged seed data task")
                         db.delete(task)
                         task = None
                     if not task:
                         if msg.parent_message_id is None:
-                            task = pr.store_task(
+                            task = tr.store_task(
                                 protocol_schema.InitialPromptTask(hint=""), message_tree_id=None, parent_message_id=None
                             )
                         else:
                             parent_message = pr.fetch_message_by_frontend_message_id(
                                 msg.parent_message_id, fail_if_missing=True
                             )
-                            task = pr.store_task(
-                                protocol_schema.AssistantReplyTask(
-                                    conversation=protocol_schema.Conversation(
-                                        messages=[protocol_schema.ConversationMessage(text="dummy", is_assistant=False)]
+                            conversation_messages = pr.fetch_message_conversation(parent_message)
+                            conversation = protocol_schema.Conversation(
+                                messages=[
+                                    protocol_schema.ConversationMessage(
+                                        text=cmsg.text,
+                                        is_assistant=cmsg.role == "assistant",
+                                        message_id=cmsg.id,
+                                        fronend_message_id=cmsg.frontend_message_id,
                                     )
-                                ),
+                                    for cmsg in conversation_messages
+                                ]
+                            )
+                            task = tr.store_task(
+                                protocol_schema.AssistantReplyTask(conversation=conversation),
                                 message_tree_id=parent_message.message_tree_id,
                                 parent_message_id=parent_message.id,
                             )
-                        pr.bind_frontend_message_id(task.id, msg.task_message_id)
+                        tr.bind_frontend_message_id(task.id, msg.task_message_id)
                         message = pr.store_text_reply(msg.text, msg.task_message_id, msg.user_message_id)
 
                         logger.info(
@@ -219,7 +179,6 @@ if __name__ == "__main__":
     # Importing here so we don't import packages unnecessarily if we're
     # importing main as a module.
     import argparse
-    import json
 
     import uvicorn
 

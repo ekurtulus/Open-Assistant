@@ -27,8 +27,8 @@ class QADataset(Dataset):
 
     def __getitem__(self, idx):
         data = self.dataset[idx]
-        # dummy return first answer
-        return "".join([data["title"], ". ", data["context"], " " + data["question"]]), data["answers"]["text"][0]
+        # return first answer form list of possible answers
+        return data["title"] + ". " + data["context"] + " " + data["question"], data["answers"]["text"][0]
 
 
 class SummarizationDataset(Dataset):
@@ -84,6 +84,7 @@ def train_val_dataset(dataset, val_split=0.2):
 def get_one_dataset(conf, dataset_name):
     dataset_name = dataset_name.lower()
 
+<<<<<<< HEAD
     if dataset_name in ["squad_v2", "adversarial_qa", "trivia_qa_context", "trivia_qa_noconext"]:
         train = QADataset(dataset_name, conf.cache_dir, "train")
         eval = QADataset(dataset_name, conf.cache_dir, "validation")
@@ -92,6 +93,11 @@ def get_one_dataset(conf, dataset_name):
         train = SummarizationDataset(dataset_name, conf.cache_dir, "train")
         eval = SummarizationDataset(dataset_name, conf.cache_dir, "validation")        
         
+=======
+    if dataset_name == "squadv2":
+        train = SquadV2Dataset(conf.cache_dir, "train")
+        eval = SquadV2Dataset(conf.cache_dir, "validation")
+>>>>>>> 66891dd690d86f341c76bd249a89f7c2235ffe00
     elif dataset_name == "webgpt":
         dataset = WebGPT()
         train, eval = train_val_dataset(dataset, val_split=0.2)
