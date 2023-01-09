@@ -5,11 +5,22 @@ from torch.utils.data import Dataset, Subset
 from .prompt_dialogue import PromptGeneratedDataset
 
 QA_SPECIAL_TOKENS = {"Question": "<question>", "Answer": "<answer>"}
+SUMMARIZATION_SPECIAL_TOKENS = {"Text" : "", "Summary" : "TL;DR:"}
+
+summarization_name_mapping = {
+    "cnn_dailymail": ("article", "highlights"),
+    "samsum": ("dialogue", "summary"),
+    "xsum": ("document", "summary"),
+    "multi_news": ("document", "summary"),
+}
 
 
-class SquadV2Dataset(Dataset):
-    def __init__(self, cache_dir, split):
-        self.dataset = load_dataset("squad_v2", cache_dir=cache_dir, split=split)
+class QADataset(Dataset):
+    def __init__(self, dataset, cache_dir, split):
+        self.dataset = load_dataset(dataset, cache_dir=cache_dir, split=split)
+        # handle conversion between the dataset formats if needed by creating a
+        # preprocess function here
+        pass
 
     def __len__(self):
         return len(self.dataset)
@@ -19,6 +30,21 @@ class SquadV2Dataset(Dataset):
         # dummy return first answer
         return "".join([data["title"], ". ", data["context"], " " + data["question"]]), data["answers"]["text"][0]
 
+
+class SummarizationDataset(Dataset):
+    def __init__(self, dataset, cache_dir, split):
+        self.dataset = load_dataset(dataset, cache_dir=cache_dir, split=split)
+        self.summary_column, self.text_column = summarization_name_mapping[dataset]
+    
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        data = self.dataset[idx]
+        # dummy return first answer
+        return " ".join(SUMMARIZATION_SPECIAL_TOKENS["Text"], data[self.text_column], " ", 
+                        SUMMARIZATION_SPECIAL_TOKENS["Summary"], data[self.summary_column])
+        
 
 class WebGPT(Dataset):
     def __init__(self) -> None:
@@ -58,10 +84,14 @@ def train_val_dataset(dataset, val_split=0.2):
 def get_one_dataset(conf, dataset_name):
     dataset_name = dataset_name.lower()
 
-    if dataset_name == "squadv2":
-        raise ValueError("SquadV2 is not diverse enough for generation .. ")
-        train = SquadV2Dataset(conf.cache_dir, "train")
-        eval = SquadV2Dataset(conf.cache_dir, "validation")
+    if dataset_name in ["squad_v2", "adversarial_qa", "trivia_qa_context", "trivia_qa_noconext"]:
+        train = QADataset(dataset_name, conf.cache_dir, "train")
+        eval = QADataset(dataset_name, conf.cache_dir, "validation")
+    
+    elif dataset_name in ["xsum", "cnn_dailymail", "samsum", "multi_news"]:
+        train = SummarizationDataset(dataset_name, conf.cache_dir, "train")
+        eval = SummarizationDataset(dataset_name, conf.cache_dir, "validation")        
+        
     elif dataset_name == "webgpt":
         dataset = WebGPT()
         train, eval = train_val_dataset(dataset, val_split=0.2)

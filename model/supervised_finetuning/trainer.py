@@ -8,14 +8,18 @@ from torch import nn
 from transformers import PreTrainedModel, Trainer, TrainingArguments, get_cosine_schedule_with_warmup
 from utils import get_dataset, get_loss, get_model, get_tokenizer, read_yamls
 
+
 os.environ["WANDB_PROJECT"] = "supervised-finetuning"
 
 
-def compute_metrics(eval_pred):
-    pred_ids = eval_pred.predictions
-    labels = eval_pred.label_ids
+def compute_metrics(eval_pred, preprocess_fn, metrics):
+    preds, labels = preprocess_fn(eval_pred)
 
-    return {"accuracy": (pred_ids[labels > 0] == labels[labels > 0]).mean()}
+    out = {}
+    for metric in metrics:
+        out = dict(**out, **metric.compute(predictions=preds, references=labels))
+
+    return out
 
 
 def preprocess_logits_for_metrics(logits, labels):
@@ -29,12 +33,13 @@ class SFTTrainer(Trainer):
         model: Union[PreTrainedModel, nn.Module] = None,
         args: TrainingArguments = None,
         loss_function: str = "CrossEntropyLoss",
+        poly_eps: float = 1.0
         **kwargs,
     ):
         super().__init__(model, args, **kwargs)
 
         # By default CrossEntropyLoss ignores padding_index -100, but just in case use our own loss_fct
-        self.loss_fct = get_loss(loss_function)
+        self.loss_fct = get_loss(loss_function, poly_eps)
 
     def fetch_scheduler(self):
         return get_cosine_schedule_with_warmup(
@@ -99,6 +104,8 @@ def argument_parsing(notebook=False, notebook_args=None):
     parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument("--deepspeed", action="store_true")
     parser.add_argument("--no-deepspeed", dest="deepspeed", action="store_false")
+    parser.add_argument("--poly_eps", type=float, default=1.0)
+    parser.add_argument("--seq2seq_model", action="store_true")
     parser.set_defaults(deepspeed=False)
 
     if notebook:
@@ -136,6 +143,7 @@ if __name__ == "__main__":
     model = get_model(training_conf, tokenizer)
 
     train, evals, collate_fn = get_dataset(training_conf, tokenizer)
+    metrics, preprocess_fn = get_metrics(training_conf)
 
     args = TrainingArguments(
         output_dir=f"{training_conf.model_name}-{training_conf.log_dir}-finetuned",
@@ -159,6 +167,8 @@ if __name__ == "__main__":
         eval_accumulation_steps=training_conf.eval_accumulation_steps,
         report_to="wandb",
     )
+
+    
 
     assert len(evals) > 0
     trainer = SFTTrainer(
